@@ -269,6 +269,18 @@ class TestHashedFiles:
             )
         self.assertPostCondition()
 
+    def test_css_source_map_data_uri(self):
+        relpath = self.hashed_file_path("cached/source_map_data_uri.css")
+        self.assertEqual(relpath, "cached/source_map_data_uri.3166be10260d.css")
+        with storage.staticfiles_storage.open(relpath) as relfile:
+            content = relfile.read()
+            source_map_data_uri = (
+                b"/*# sourceMappingURL=data:application/json;charset=utf8;base64,"
+                b"eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIl9zcmMv*/"
+            )
+            self.assertIn(source_map_data_uri, content)
+        self.assertPostCondition()
+
     def test_js_source_map(self):
         relpath = self.hashed_file_path("cached/source_map.js")
         self.assertEqual(relpath, "cached/source_map.cd45b8534a87.js")
@@ -307,6 +319,18 @@ class TestHashedFiles:
             )
         self.assertPostCondition()
 
+    def test_js_source_map_data_uri(self):
+        relpath = self.hashed_file_path("cached/source_map_data_uri.js")
+        self.assertEqual(relpath, "cached/source_map_data_uri.a68d23cbf6dd.js")
+        with storage.staticfiles_storage.open(relpath) as relfile:
+            content = relfile.read()
+            source_map_data_uri = (
+                b"//# sourceMappingURL=data:application/json;charset=utf8;base64,"
+                b"eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIl9zcmMv"
+            )
+            self.assertIn(source_map_data_uri, content)
+        self.assertPostCondition()
+
     @override_settings(
         STATICFILES_DIRS=[os.path.join(TEST_ROOT, "project", "faulty")],
         STATICFILES_FINDERS=["django.contrib.staticfiles.finders.FileSystemFinder"],
@@ -337,6 +361,7 @@ class TestHashedFiles:
 
 @override_settings(
     STORAGES={
+        **settings.STORAGES,
         STATICFILES_STORAGE_ALIAS: {
             "BACKEND": "staticfiles_tests.storage.ExtraPatternsStorage",
         },
@@ -372,6 +397,7 @@ class TestExtraPatternsStorage(CollectionTestCase):
 
 @override_settings(
     STORAGES={
+        **settings.STORAGES,
         STATICFILES_STORAGE_ALIAS: {
             "BACKEND": "django.contrib.staticfiles.storage.ManifestStaticFilesStorage",
         },
@@ -537,6 +563,7 @@ class TestCollectionManifestStorage(TestHashedFiles, CollectionTestCase):
 
 @override_settings(
     STORAGES={
+        **settings.STORAGES,
         STATICFILES_STORAGE_ALIAS: {
             "BACKEND": "staticfiles_tests.storage.NoneHashStorage",
         },
@@ -552,6 +579,7 @@ class TestCollectionNoneHashStorage(CollectionTestCase):
 
 @override_settings(
     STORAGES={
+        **settings.STORAGES,
         STATICFILES_STORAGE_ALIAS: {
             "BACKEND": "staticfiles_tests.storage.NoPostProcessReplacedPathStorage",
         },
@@ -568,6 +596,7 @@ class TestCollectionNoPostProcessReplacedPaths(CollectionTestCase):
 
 @override_settings(
     STORAGES={
+        **settings.STORAGES,
         STATICFILES_STORAGE_ALIAS: {
             "BACKEND": "staticfiles_tests.storage.SimpleStorage",
         },
@@ -606,6 +635,7 @@ class JSModuleImportAggregationManifestStorage(storage.ManifestStaticFilesStorag
 
 @override_settings(
     STORAGES={
+        **settings.STORAGES,
         STATICFILES_STORAGE_ALIAS: {
             "BACKEND": (
                 "staticfiles_tests.test_storage."
@@ -787,6 +817,7 @@ class TestStaticFilePermissions(CollectionTestCase):
         FILE_UPLOAD_PERMISSIONS=0o655,
         FILE_UPLOAD_DIRECTORY_PERMISSIONS=0o765,
         STORAGES={
+            **settings.STORAGES,
             STATICFILES_STORAGE_ALIAS: {
                 "BACKEND": "staticfiles_tests.test_storage.CustomStaticFilesStorage",
             },
@@ -811,6 +842,7 @@ class TestStaticFilePermissions(CollectionTestCase):
 
 @override_settings(
     STORAGES={
+        **settings.STORAGES,
         STATICFILES_STORAGE_ALIAS: {
             "BACKEND": "django.contrib.staticfiles.storage.ManifestStaticFilesStorage",
         },

@@ -5,7 +5,6 @@ import posixpath
 import sys
 import threading
 import unittest
-import warnings
 from collections import Counter
 from contextlib import contextmanager
 from copy import copy, deepcopy
@@ -51,8 +50,8 @@ from django.test.utils import (
     modify_settings,
     override_settings,
 )
-from django.utils.deprecation import RemovedInDjango51Warning
 from django.utils.functional import classproperty
+from django.utils.version import PY311
 from django.views.static import serve
 
 logger = logging.getLogger("django.test")
@@ -64,6 +63,24 @@ __all__ = (
     "skipIfDBFeature",
     "skipUnlessDBFeature",
 )
+
+
+if not PY311:
+    # Backport of unittest.case._enter_context() from Python 3.11.
+    def _enter_context(cm, addcleanup):
+        # Look up the special methods on the type to match the with statement.
+        cls = type(cm)
+        try:
+            enter = cls.__enter__
+            exit = cls.__exit__
+        except AttributeError:
+            raise TypeError(
+                f"'{cls.__module__}.{cls.__qualname__}' object does not support the "
+                f"context manager protocol"
+            ) from None
+        result = enter(cm)
+        addcleanup(exit, cm, None, None, None)
+        return result
 
 
 def to_list(value):
@@ -116,18 +133,16 @@ class _AssertTemplateUsedContext:
         self.count = count
 
         self.rendered_templates = []
-        self.rendered_template_names = []
         self.context = ContextList()
 
     def on_template_render(self, sender, signal, template, context, **kwargs):
         self.rendered_templates.append(template)
-        self.rendered_template_names.append(template.name)
         self.context.append(copy(context))
 
     def test(self):
         self.test_case._assert_template_used(
             self.template_name,
-            self.rendered_template_names,
+            [t.name for t in self.rendered_templates if t.name is not None],
             self.msg_prefix,
             self.count,
         )
@@ -145,8 +160,11 @@ class _AssertTemplateUsedContext:
 
 class _AssertTemplateNotUsedContext(_AssertTemplateUsedContext):
     def test(self):
+        rendered_template_names = [
+            t.name for t in self.rendered_templates if t.name is not None
+        ]
         self.test_case.assertFalse(
-            self.template_name in self.rendered_template_names,
+            self.template_name in rendered_template_names,
             f"{self.msg_prefix}Template '{self.template_name}' was used "
             f"unexpectedly in rendering the response",
         )
@@ -251,7 +269,7 @@ class SimpleTestCase(unittest.TestCase):
     def __call__(self, result=None):
         """
         Wrapper around default __call__ method to perform common Django test
-        set up. This means that user-defined Test Cases aren't required to
+        set up. This means that user-defined TestCases aren't required to
         include a call to super().setUp().
         """
         self._setup_and_call(result)
@@ -312,6 +330,12 @@ class SimpleTestCase(unittest.TestCase):
     def _post_teardown(self):
         """Perform post-test things."""
         pass
+
+    if not PY311:
+        # Backport of unittest.TestCase.enterClassContext() from Python 3.11.
+        @classmethod
+        def enterClassContext(cls, cm):
+            return _enter_context(cm, cls.addClassCleanup)
 
     def settings(self, **kwargs):
         """
@@ -464,6 +488,8 @@ class SimpleTestCase(unittest.TestCase):
                 (scheme, netloc, path, params, urlencode(query_parts), fragment)
             )
 
+        if msg_prefix:
+            msg_prefix += ": "
         self.assertEqual(
             normalize(url1),
             normalize(url2),
@@ -494,6 +520,7 @@ class SimpleTestCase(unittest.TestCase):
             content = b"".join(response.streaming_content)
         else:
             content = response.content
+        content_repr = safe_repr(content)
         if not isinstance(text, bytes) or html:
             text = str(text)
             content = content.decode(response.charset)
@@ -508,7 +535,7 @@ class SimpleTestCase(unittest.TestCase):
                 self, text, None, "Second argument is not valid HTML:"
             )
         real_count = content.count(text)
-        return (text_repr, real_count, msg_prefix)
+        return text_repr, real_count, msg_prefix, content_repr
 
     def assertContains(
         self, response, text, count=None, status_code=200, msg_prefix="", html=False
@@ -520,7 +547,7 @@ class SimpleTestCase(unittest.TestCase):
         If ``count`` is None, the count doesn't matter - the assertion is true
         if the text occurs at least once in the response.
         """
-        text_repr, real_count, msg_prefix = self._assert_contains(
+        text_repr, real_count, msg_prefix, content_repr = self._assert_contains(
             response, text, status_code, msg_prefix, html
         )
 
@@ -528,13 +555,18 @@ class SimpleTestCase(unittest.TestCase):
             self.assertEqual(
                 real_count,
                 count,
-                msg_prefix
-                + "Found %d instances of %s in response (expected %d)"
-                % (real_count, text_repr, count),
+                (
+                    f"{msg_prefix}Found {real_count} instances of {text_repr} "
+                    f"(expected {count}) in the following response\n{content_repr}"
+                ),
             )
         else:
             self.assertTrue(
-                real_count != 0, msg_prefix + "Couldn't find %s in response" % text_repr
+                real_count != 0,
+                (
+                    f"{msg_prefix}Couldn't find {text_repr} in the following response\n"
+                    f"{content_repr}"
+                ),
             )
 
     def assertNotContains(
@@ -545,12 +577,17 @@ class SimpleTestCase(unittest.TestCase):
         successfully, (i.e., the HTTP status code was as expected) and that
         ``text`` doesn't occur in the content of the response.
         """
-        text_repr, real_count, msg_prefix = self._assert_contains(
+        text_repr, real_count, msg_prefix, content_repr = self._assert_contains(
             response, text, status_code, msg_prefix, html
         )
 
         self.assertEqual(
-            real_count, 0, msg_prefix + "Response should not contain %s" % text_repr
+            real_count,
+            0,
+            (
+                f"{msg_prefix}{text_repr} unexpectedly found in the following response"
+                f"\n{content_repr}"
+            ),
         )
 
     def _check_test_client_response(self, response, attribute, method_name):
@@ -600,15 +637,6 @@ class SimpleTestCase(unittest.TestCase):
             msg_prefix += ": "
         errors = to_list(errors)
         self._assert_form_error(form, field, errors, msg_prefix, f"form {form!r}")
-
-    # RemovedInDjango51Warning.
-    def assertFormsetError(self, *args, **kw):
-        warnings.warn(
-            "assertFormsetError() is deprecated in favor of assertFormSetError().",
-            category=RemovedInDjango51Warning,
-            stacklevel=2,
-        )
-        return self.assertFormSetError(*args, **kw)
 
     def assertFormSetError(self, formset, form_index, field, errors, msg_prefix=""):
         """
@@ -883,24 +911,32 @@ class SimpleTestCase(unittest.TestCase):
             self.fail(self._formatMessage(msg, standardMsg))
 
     def assertInHTML(self, needle, haystack, count=None, msg_prefix=""):
-        needle = assert_and_parse_html(
+        parsed_needle = assert_and_parse_html(
             self, needle, None, "First argument is not valid HTML:"
         )
-        haystack = assert_and_parse_html(
+        parsed_haystack = assert_and_parse_html(
             self, haystack, None, "Second argument is not valid HTML:"
         )
-        real_count = haystack.count(needle)
+        real_count = parsed_haystack.count(parsed_needle)
+        if msg_prefix:
+            msg_prefix += ": "
+        haystack_repr = safe_repr(haystack)
         if count is not None:
             self.assertEqual(
                 real_count,
                 count,
-                msg_prefix
-                + "Found %d instances of '%s' in response (expected %d)"
-                % (real_count, needle, count),
+                (
+                    f"{msg_prefix}Found {real_count} instances of {needle!r} (expected "
+                    f"{count}) in the following response\n{haystack_repr}"
+                ),
             )
         else:
             self.assertTrue(
-                real_count != 0, msg_prefix + "Couldn't find '%s' in response" % needle
+                real_count != 0,
+                (
+                    f"{msg_prefix}Couldn't find {needle!r} in the following response\n"
+                    f"{haystack_repr}"
+                ),
             )
 
     def assertJSONEqual(self, raw, expected_data, msg=None):
@@ -1085,11 +1121,7 @@ class TransactionTestCase(SimpleTestCase):
                     apps.set_available_apps(self.available_apps)
 
             if self.fixtures:
-                # We have to use this slightly awkward syntax due to the fact
-                # that we're using *args and **kwargs together.
-                call_command(
-                    "loaddata", *self.fixtures, **{"verbosity": 0, "database": db_name}
-                )
+                call_command("loaddata", *self.fixtures, verbosity=0, database=db_name)
 
     def _should_reload_connections(self):
         return True
@@ -1145,15 +1177,6 @@ class TransactionTestCase(SimpleTestCase):
                 allow_cascade=self.available_apps is not None,
                 inhibit_post_migrate=inhibit_post_migrate,
             )
-
-    # RemovedInDjango51Warning.
-    def assertQuerysetEqual(self, *args, **kw):
-        warnings.warn(
-            "assertQuerysetEqual() is deprecated in favor of assertQuerySetEqual().",
-            category=RemovedInDjango51Warning,
-            stacklevel=2,
-        )
-        return self.assertQuerySetEqual(*args, **kw)
 
     def assertQuerySetEqual(self, qs, values, transform=None, ordered=True, msg=None):
         values = list(values)
@@ -1282,7 +1305,8 @@ class TestCase(TransactionTestCase):
                     call_command(
                         "loaddata",
                         *cls.fixtures,
-                        **{"verbosity": 0, "database": db_name},
+                        verbosity=0,
+                        database=db_name,
                     )
                 except Exception:
                     cls._rollback_atomics(cls.cls_atomics)

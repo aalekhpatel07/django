@@ -52,7 +52,7 @@ FORBIDDEN_ALIAS_PATTERN = _lazy_re_compile(r"['`\"\]\[;\s]|--|/\*|\*/")
 
 # Inspired from
 # https://www.postgresql.org/docs/current/sql-syntax-lexical.html#SQL-SYNTAX-IDENTIFIERS
-EXPLAIN_OPTIONS_PATTERN = _lazy_re_compile(r"[\w\-]+")
+EXPLAIN_OPTIONS_PATTERN = _lazy_re_compile(r"[\w-]+")
 
 
 def get_field_names_from_opts(opts):
@@ -65,12 +65,60 @@ def get_field_names_from_opts(opts):
     )
 
 
+def get_paths_from_expression(expr):
+    if isinstance(expr, F):
+        yield expr.name
+    elif hasattr(expr, "flatten"):
+        for child in expr.flatten():
+            if isinstance(child, F):
+                yield child.name
+            elif isinstance(child, Q):
+                yield from get_children_from_q(child)
+
+
 def get_children_from_q(q):
     for child in q.children:
         if isinstance(child, Node):
             yield from get_children_from_q(child)
-        else:
-            yield child
+        elif isinstance(child, tuple):
+            lhs, rhs = child
+            yield lhs
+            if hasattr(rhs, "resolve_expression"):
+                yield from get_paths_from_expression(rhs)
+        elif hasattr(child, "resolve_expression"):
+            yield from get_paths_from_expression(child)
+
+
+def get_child_with_renamed_prefix(prefix, replacement, child):
+    if isinstance(child, Node):
+        return rename_prefix_from_q(prefix, replacement, child)
+    if isinstance(child, tuple):
+        lhs, rhs = child
+        lhs = lhs.replace(prefix, replacement, 1)
+        if not isinstance(rhs, F) and hasattr(rhs, "resolve_expression"):
+            rhs = get_child_with_renamed_prefix(prefix, replacement, rhs)
+        return lhs, rhs
+
+    if isinstance(child, F):
+        child = child.copy()
+        child.name = child.name.replace(prefix, replacement, 1)
+    elif hasattr(child, "resolve_expression"):
+        child = child.copy()
+        child.set_source_expressions(
+            [
+                get_child_with_renamed_prefix(prefix, replacement, grand_child)
+                for grand_child in child.get_source_expressions()
+            ]
+        )
+    return child
+
+
+def rename_prefix_from_q(prefix, replacement, q):
+    return Q.create(
+        [get_child_with_renamed_prefix(prefix, replacement, c) for c in q.children],
+        q.connector,
+        q.negated,
+    )
 
 
 JoinInfo = namedtuple(
@@ -387,7 +435,12 @@ class Query(BaseExpression):
         """
         if not aggregate_exprs:
             return {}
-        aggregates = {}
+        # Store annotation mask prior to temporarily adding aggregations for
+        # resolving purpose to facilitate their subsequent removal.
+        refs_subquery = False
+        refs_window = False
+        replacements = {}
+        annotation_select_mask = self.annotation_select_mask
         for alias, aggregate_expr in aggregate_exprs.items():
             self.check_alias(alias)
             aggregate = aggregate_expr.resolve_expression(
@@ -395,7 +448,25 @@ class Query(BaseExpression):
             )
             if not aggregate.contains_aggregate:
                 raise TypeError("%s is not an aggregate expression" % alias)
-            aggregates[alias] = aggregate
+            # Temporarily add aggregate to annotations to allow remaining
+            # members of `aggregates` to resolve against each others.
+            self.append_annotation_mask([alias])
+            aggregate_refs = aggregate.get_refs()
+            refs_subquery |= any(
+                getattr(self.annotations[ref], "contains_subquery", False)
+                for ref in aggregate_refs
+            )
+            refs_window |= any(
+                getattr(self.annotations[ref], "contains_over_clause", True)
+                for ref in aggregate_refs
+            )
+            aggregate = aggregate.replace_expressions(replacements)
+            self.annotations[alias] = aggregate
+            replacements[Ref(alias, aggregate)] = aggregate
+        # Stash resolved aggregates now that they have been allowed to resolve
+        # against each other.
+        aggregates = {alias: self.annotations.pop(alias) for alias in aggregate_exprs}
+        self.set_annotation_mask(annotation_select_mask)
         # Existing usage of aggregation can be determined by the presence of
         # selected aggregates but also by filters against aliased aggregates.
         _, having, qualify = self.where.split_having_qualify()
@@ -420,6 +491,8 @@ class Query(BaseExpression):
             isinstance(self.group_by, tuple)
             or self.is_sliced
             or has_existing_aggregation
+            or refs_subquery
+            or refs_window
             or qualify
             or self.distinct
             or self.combinator
@@ -447,17 +520,22 @@ class Query(BaseExpression):
                         self.model._meta.pk.get_col(inner_query.get_initial_alias()),
                     )
                 inner_query.default_cols = False
-                if not qualify:
+                if not qualify and not self.combinator:
                     # Mask existing annotations that are not referenced by
                     # aggregates to be pushed to the outer query unless
-                    # filtering against window functions is involved as it
-                    # requires complex realising.
+                    # filtering against window functions or if the query is
+                    # combined as both would require complex realiasing logic.
                     annotation_mask = set()
                     if isinstance(self.group_by, tuple):
                         for expr in self.group_by:
                             annotation_mask |= expr.get_refs()
                     for aggregate in aggregates.values():
                         annotation_mask |= aggregate.get_refs()
+                    # Avoid eliding expressions that might have an incidence on
+                    # the implicit grouping logic.
+                    for annotation_alias, annotation in self.annotation_select.items():
+                        if annotation.get_group_by_cols():
+                            annotation_mask.add(annotation_alias)
                     inner_query.set_annotation_mask(annotation_mask)
 
             # Add aggregates to the outer AggregateQuery. This requires making
@@ -725,7 +803,15 @@ class Query(BaseExpression):
                 field_select_mask = select_mask.setdefault((field_name, relation), {})
                 field = relation.field
             else:
-                field = opts.get_field(field_name).field
+                reverse_rel = opts.get_field(field_name)
+                # While virtual fields such as many-to-many and generic foreign
+                # keys cannot be effectively deferred we've historically
+                # allowed them to be passed to QuerySet.defer(). Ignore such
+                # field references until a layer of validation at mask
+                # alteration time will be implemented eventually.
+                if not hasattr(reverse_rel, "field"):
+                    continue
+                field = reverse_rel.field
                 field_select_mask = select_mask.setdefault(field, {})
             related_model = field.model._meta.concrete_model
             self._get_defer_select_mask(
@@ -740,7 +826,13 @@ class Query(BaseExpression):
         # Only include fields mentioned in the mask.
         for field_name, field_mask in mask.items():
             field = opts.get_field(field_name)
-            field_select_mask = select_mask.setdefault(field, {})
+            # Retrieve the actual field associated with reverse relationships
+            # as that's what is expected in the select mask.
+            if field in opts.related_objects:
+                field_key = field.field
+            else:
+                field_key = field
+            field_select_mask = select_mask.setdefault(field_key, {})
             if field_mask:
                 if not field.is_relation:
                     raise FieldError(next(iter(field_mask)))
@@ -994,7 +1086,7 @@ class Query(BaseExpression):
         """
         return len([1 for count in self.alias_refcount.values() if count])
 
-    def join(self, join, reuse=None, reuse_with_filtered_relation=False):
+    def join(self, join, reuse=None):
         """
         Return an alias for the 'join', either reusing an existing alias for
         that join or creating a new one. 'join' is either a base_table_class or
@@ -1003,23 +1095,15 @@ class Query(BaseExpression):
         The 'reuse' parameter can be either None which means all joins are
         reusable, or it can be a set containing the aliases that can be reused.
 
-        The 'reuse_with_filtered_relation' parameter is used when computing
-        FilteredRelation instances.
-
         A join is always created as LOUTER if the lhs alias is LOUTER to make
         sure chains like t1 LOUTER t2 INNER t3 aren't generated. All new
         joins are created as LOUTER if the join is nullable.
         """
-        if reuse_with_filtered_relation and reuse:
-            reuse_aliases = [
-                a for a, j in self.alias_map.items() if a in reuse and j.equals(join)
-            ]
-        else:
-            reuse_aliases = [
-                a
-                for a, j in self.alias_map.items()
-                if (reuse is None or a in reuse) and j == join
-            ]
+        reuse_aliases = [
+            a
+            for a, j in self.alias_map.items()
+            if (reuse is None or a in reuse) and j == join
+        ]
         if reuse_aliases:
             if join.table_alias in reuse_aliases:
                 reuse_alias = join.table_alias
@@ -1042,6 +1126,18 @@ class Query(BaseExpression):
             join.join_type = join_type
         join.table_alias = alias
         self.alias_map[alias] = join
+        if filtered_relation := join.filtered_relation:
+            resolve_reuse = reuse
+            if resolve_reuse is not None:
+                resolve_reuse = set(reuse) | {alias}
+            joins_len = len(self.alias_map)
+            join.filtered_relation = filtered_relation.resolve_expression(
+                self, reuse=resolve_reuse
+            )
+            # Some joins were during expression resolving, they must be present
+            # before the one we just added.
+            if joins_len < len(self.alias_map):
+                self.alias_map[alias] = self.alias_map.pop(alias)
         return alias
 
     def join_parent_model(self, opts, model, alias, seen):
@@ -1161,18 +1257,19 @@ class Query(BaseExpression):
             sql = "(%s)" % sql
         return sql, params
 
-    def resolve_lookup_value(self, value, can_reuse, allow_joins):
+    def resolve_lookup_value(self, value, can_reuse, allow_joins, summarize=False):
         if hasattr(value, "resolve_expression"):
             value = value.resolve_expression(
                 self,
                 reuse=can_reuse,
                 allow_joins=allow_joins,
+                summarize=summarize,
             )
         elif isinstance(value, (list, tuple)):
             # The items of the iterable may be expressions and therefore need
             # to be resolved independently.
             values = (
-                self.resolve_lookup_value(sub_value, can_reuse, allow_joins)
+                self.resolve_lookup_value(sub_value, can_reuse, allow_joins, summarize)
                 for sub_value in value
             )
             type_ = type(value)
@@ -1328,9 +1425,9 @@ class Query(BaseExpression):
         can_reuse=None,
         allow_joins=True,
         split_subq=True,
-        reuse_with_filtered_relation=False,
         check_filterable=True,
         summarize=False,
+        update_join_types=True,
     ):
         """
         Build a WhereNode for a single filter clause but don't add it
@@ -1353,9 +1450,6 @@ class Query(BaseExpression):
 
         The 'can_reuse' is a set of reusable joins for multijoins.
 
-        If 'reuse_with_filtered_relation' is True, then only joins in can_reuse
-        will be reused.
-
         The method will create a filter clause that can be added to the current
         query. However, if the filter isn't added to the query then the caller
         is responsible for unreffing the joins used.
@@ -1372,6 +1466,7 @@ class Query(BaseExpression):
                 split_subq=split_subq,
                 check_filterable=check_filterable,
                 summarize=summarize,
+                update_join_types=update_join_types,
             )
         if hasattr(filter_expr, "resolve_expression"):
             if not getattr(filter_expr, "conditional", False):
@@ -1394,7 +1489,7 @@ class Query(BaseExpression):
             raise FieldError("Joined field references are not permitted in this query")
 
         pre_joins = self.alias_refcount.copy()
-        value = self.resolve_lookup_value(value, can_reuse, allow_joins)
+        value = self.resolve_lookup_value(value, can_reuse, allow_joins, summarize)
         used_joins = {
             k for k, v in self.alias_refcount.items() if v > pre_joins.get(k, 0)
         }
@@ -1417,7 +1512,6 @@ class Query(BaseExpression):
                 alias,
                 can_reuse=can_reuse,
                 allow_many=allow_many,
-                reuse_with_filtered_relation=reuse_with_filtered_relation,
             )
 
             # Prevent iterator from being consumed by check_related_objects()
@@ -1525,6 +1619,7 @@ class Query(BaseExpression):
         split_subq=True,
         check_filterable=True,
         summarize=False,
+        update_join_types=True,
     ):
         """Add a Q-object to the current filter."""
         connector = q_object.connector
@@ -1544,45 +1639,19 @@ class Query(BaseExpression):
                 split_subq=split_subq,
                 check_filterable=check_filterable,
                 summarize=summarize,
+                update_join_types=update_join_types,
             )
             joinpromoter.add_votes(needed_inner)
             if child_clause:
                 target_clause.add(child_clause, connector)
-        needed_inner = joinpromoter.update_join_types(self)
+        if update_join_types:
+            needed_inner = joinpromoter.update_join_types(self)
+        else:
+            needed_inner = []
         return target_clause, needed_inner
-
-    def build_filtered_relation_q(
-        self, q_object, reuse, branch_negated=False, current_negated=False
-    ):
-        """Add a FilteredRelation object to the current filter."""
-        connector = q_object.connector
-        current_negated ^= q_object.negated
-        branch_negated = branch_negated or q_object.negated
-        target_clause = WhereNode(connector=connector, negated=q_object.negated)
-        for child in q_object.children:
-            if isinstance(child, Node):
-                child_clause = self.build_filtered_relation_q(
-                    child,
-                    reuse=reuse,
-                    branch_negated=branch_negated,
-                    current_negated=current_negated,
-                )
-            else:
-                child_clause, _ = self.build_filter(
-                    child,
-                    can_reuse=reuse,
-                    branch_negated=branch_negated,
-                    current_negated=current_negated,
-                    allow_joins=True,
-                    split_subq=False,
-                    reuse_with_filtered_relation=True,
-                )
-            target_clause.add(child_clause, connector)
-        return target_clause
 
     def add_filtered_relation(self, filtered_relation, alias):
         filtered_relation.alias = alias
-        lookups = dict(get_children_from_q(filtered_relation.condition))
         relation_lookup_parts, relation_field_parts, _ = self.solve_lookup_type(
             filtered_relation.relation_name
         )
@@ -1591,7 +1660,7 @@ class Query(BaseExpression):
                 "FilteredRelation's relation_name cannot contain lookups "
                 "(got %r)." % filtered_relation.relation_name
             )
-        for lookup in chain(lookups):
+        for lookup in get_children_from_q(filtered_relation.condition):
             lookup_parts, lookup_field_parts, _ = self.solve_lookup_type(lookup)
             shift = 2 if not lookup_parts else 1
             lookup_field_path = lookup_field_parts[:-shift]
@@ -1609,6 +1678,11 @@ class Query(BaseExpression):
                         "relations deeper than the relation_name (got %r for "
                         "%r)." % (lookup, filtered_relation.relation_name)
                     )
+        filtered_relation.condition = rename_prefix_from_q(
+            filtered_relation.relation_name,
+            alias,
+            filtered_relation.condition,
+        )
         self._filtered_relations[filtered_relation.alias] = filtered_relation
 
     def names_to_path(self, names, opts, allow_many=True, fail_on_missing=False):
@@ -1629,7 +1703,7 @@ class Query(BaseExpression):
         path, names_with_path = [], []
         for pos, name in enumerate(names):
             cur_names_with_path = (name, [])
-            if name == "pk":
+            if name == "pk" and opts is not None:
                 name = opts.pk.name
 
             field = None
@@ -1734,7 +1808,6 @@ class Query(BaseExpression):
         alias,
         can_reuse=None,
         allow_many=True,
-        reuse_with_filtered_relation=False,
     ):
         """
         Compute the necessary table joins for the passage through the fields
@@ -1746,9 +1819,6 @@ class Query(BaseExpression):
         can be None in which case all joins are reusable or a set of aliases
         that can be reused. Note that non-reverse foreign keys are always
         reusable when using setup_joins().
-
-        The 'reuse_with_filtered_relation' can be used to force 'can_reuse'
-        parameter and force the relation on the given connections.
 
         If 'allow_many' is False, then any reverse foreign key seen will
         generate a MultiJoin exception.
@@ -1841,15 +1911,9 @@ class Query(BaseExpression):
                 nullable,
                 filtered_relation=filtered_relation,
             )
-            reuse = can_reuse if join.m2m or reuse_with_filtered_relation else None
-            alias = self.join(
-                connection,
-                reuse=reuse,
-                reuse_with_filtered_relation=reuse_with_filtered_relation,
-            )
+            reuse = can_reuse if join.m2m else None
+            alias = self.join(connection, reuse=reuse)
             joins.append(alias)
-            if filtered_relation:
-                filtered_relation.path = joins[:]
         return JoinInfo(final_field, targets, opts, joins, path, final_transformer)
 
     def trim_joins(self, targets, joins, path):
@@ -2003,10 +2067,11 @@ class Query(BaseExpression):
             lookup = lookup_class(pk.get_col(query.select[0].alias), pk.get_col(alias))
             query.where.add(lookup, AND)
             query.external_aliases[alias] = True
+        else:
+            lookup_class = select_field.get_lookup("exact")
+            lookup = lookup_class(col, ResolvedOuterRef(trimmed_prefix))
+            query.where.add(lookup, AND)
 
-        lookup_class = select_field.get_lookup("exact")
-        lookup = lookup_class(col, ResolvedOuterRef(trimmed_prefix))
-        query.where.add(lookup, AND)
         condition, needed_inner = self.build_filter(Exists(query))
 
         if contains_louter:
@@ -2018,11 +2083,10 @@ class Query(BaseExpression):
             )
             condition.add(or_null_condition, OR)
             # Note that the end result will be:
-            # (outercol NOT IN innerq AND outercol IS NOT NULL) OR outercol IS NULL.
-            # This might look crazy but due to how IN works, this seems to be
-            # correct. If the IS NOT NULL check is removed then outercol NOT
-            # IN will return UNKNOWN. If the IS NULL check is removed, then if
-            # outercol IS NULL we will not match the row.
+            #   NOT EXISTS (inner_q) OR outercol IS NULL
+            # this might look crazy but due to how NULL works, this seems to be
+            # correct. If the IS NULL check is removed, then if outercol
+            # IS NULL we will not match the row.
         return condition, needed_inner
 
     def set_empty(self):

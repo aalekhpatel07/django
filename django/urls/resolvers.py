@@ -23,7 +23,7 @@ from django.utils.datastructures import MultiValueDict
 from django.utils.functional import cached_property
 from django.utils.http import RFC3986_SUBDELIMS, escape_leading_slashes
 from django.utils.regex_helper import _lazy_re_compile, normalize
-from django.utils.translation import get_language, get_supported_language_variant
+from django.utils.translation import get_language
 
 from .converters import get_converter
 from .exceptions import NoReverseMatch, Resolver404
@@ -318,7 +318,10 @@ class RoutePattern(CheckURLMixin):
         return None
 
     def check(self):
-        warnings = self._check_pattern_startswith_slash()
+        warnings = [
+            *self._check_pattern_startswith_slash(),
+            *self._check_pattern_unmatched_angle_brackets(),
+        ]
         route = self._route
         if "(?P<" in route or route.startswith("^") or route.endswith("$"):
             warnings.append(
@@ -329,6 +332,25 @@ class RoutePattern(CheckURLMixin):
                     id="2_0.W001",
                 )
             )
+        return warnings
+
+    def _check_pattern_unmatched_angle_brackets(self):
+        warnings = []
+        msg = "Your URL pattern %s has an unmatched '%s' bracket."
+        brackets = re.findall(r"[<>]", str(self._route))
+        open_bracket_counter = 0
+        for bracket in brackets:
+            if bracket == "<":
+                open_bracket_counter += 1
+            elif bracket == ">":
+                open_bracket_counter -= 1
+                if open_bracket_counter < 0:
+                    warnings.append(
+                        Warning(msg % (self.describe(), ">"), id="urls.W010")
+                    )
+                    open_bracket_counter = 0
+        if open_bracket_counter > 0:
+            warnings.append(Warning(msg % (self.describe(), "<"), id="urls.W010"))
         return warnings
 
     def _compile(self, route):
@@ -351,8 +373,7 @@ class LocalePrefixPattern:
     @property
     def language_prefix(self):
         language_code = get_language() or settings.LANGUAGE_CODE
-        default_language = get_supported_language_variant(settings.LANGUAGE_CODE)
-        if language_code == default_language and not self.prefix_default_language:
+        if language_code == settings.LANGUAGE_CODE and not self.prefix_default_language:
             return ""
         else:
             return "%s/" % language_code

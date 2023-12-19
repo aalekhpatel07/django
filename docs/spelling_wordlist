@@ -40,6 +40,7 @@ backends
 backport
 backported
 backports
+backtick
 backtraces
 balancer
 basename
@@ -327,6 +328,7 @@ OGC
 OGR
 ons
 orderable
+Orca
 Orléans
 orm
 Outdim
@@ -415,6 +417,7 @@ redisplayed
 redisplaying
 redisplays
 reenable
+reescape
 referer
 referers
 reflow
@@ -585,6 +588,7 @@ util
 utils
 Uvicorn
 uWSGI
+Uyghur
 validator
 validators
 variadic

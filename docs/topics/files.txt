@@ -49,7 +49,7 @@ the details of the attached photo:
     >>> car.photo.path
     '/media/cars/chevy.jpg'
     >>> car.photo.url
-    'http://media.example.com/cars/chevy.jpg'
+    'https://media.example.com/cars/chevy.jpg'
 
 This object -- ``car.photo`` in the example -- is a ``File`` object, which means
 it has all the methods and attributes described below.
@@ -261,14 +261,14 @@ For example::
         my_file = models.FileField(storage=select_storage)
 
 In order to set a storage defined in the :setting:`STORAGES` setting you can
-use a lambda function::
+use :data:`~django.core.files.storage.storages`::
 
     from django.core.files.storage import storages
 
 
+    def select_storage():
+        return storages["mystorage"]
+
+
     class MyModel(models.Model):
-        upload = models.FileField(storage=lambda: storages["custom_storage"])
-
-.. versionchanged:: 4.2
-
-    Support for ``storages`` was added.
+        upload = models.FileField(storage=select_storage)

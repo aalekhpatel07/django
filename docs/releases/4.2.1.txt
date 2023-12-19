@@ -2,9 +2,26 @@
 Django 4.2.1 release notes
 ==========================
 
-*Expected May 1, 2023*
+*May 3, 2023*
 
-Django 4.2.1 fixes several bugs in 4.2.
+Django 4.2.1 fixes a security issue with severity "low" and several bugs in
+4.2.
+
+CVE-2023-31047: Potential bypass of validation when uploading multiple files using one form field
+=================================================================================================
+
+Uploading multiple files using one form field has never been supported by
+:class:`.forms.FileField` or :class:`.forms.ImageField` as only the last
+uploaded file was validated. Unfortunately, :ref:`uploading_multiple_files`
+topic suggested otherwise.
+
+In order to avoid the vulnerability, :class:`~django.forms.ClearableFileInput`
+and :class:`~django.forms.FileInput` form widgets now raise ``ValueError`` when
+the ``multiple`` HTML attribute is set on them. To prevent the exception and
+keep the old behavior, set ``allow_multiple_selected`` to ``True``.
+
+For more details on using the new attribute and handling of multiple files
+through a single field, see :ref:`uploading_multiple_files`.
 
 Bugfixes
 ========
@@ -30,6 +47,11 @@ Bugfixes
   ``prefix_default_language`` argument when a fallback language of the default
   language was used (:ticket:`34455`).
 
+* Fixed a regression in Django 4.2 where translated URLs of the default
+  language from ``i18n_patterns()`` with ``prefix_default_language`` set to
+  ``False`` raised 404 errors for a request with a different language
+  (:ticket:`34515`).
+
 * Fixed a regression in Django 4.2 where creating copies and deep copies of
   ``HttpRequest``, ``HttpResponse``, and their subclasses didn't always work
   correctly (:ticket:`34482`, :ticket:`34484`).
@@ -41,3 +63,14 @@ Bugfixes
 * Fixed a regression in Django 4.2 that caused a crash of
   :class:`~django.contrib.postgres.search.SearchHeadline` function with
   ``psycopg`` 3 (:ticket:`34486`).
+
+* Fixed a regression in Django 4.2 that caused incorrect ``ClearableFileInput``
+  margins in the admin (:ticket:`34506`).
+
+* Fixed a regression in Django 4.2 where breadcrumbs didn't appear on admin
+  site app index views (:ticket:`34512`).
+
+* Made squashing migrations reduce ``AddIndex``, ``RemoveIndex``,
+  ``RenameIndex``, and ``CreateModel`` operations which allows removing a
+  deprecated ``Meta.index_together`` option from historical migrations and use
+  ``Meta.indexes`` instead (:ticket:`34525`).

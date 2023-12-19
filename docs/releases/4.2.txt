@@ -23,8 +23,9 @@ end in April 2024.
 Python compatibility
 ====================
 
-Django 4.2 supports Python 3.8, 3.9, 3.10, and 3.11. We **highly recommend**
-and only officially support the latest release of each series.
+Django 4.2 supports Python 3.8, 3.9, 3.10, 3.11, and 3.12 (as of 4.2.8). We
+**highly recommend** and only officially support the latest release of each
+series.
 
 .. _whats-new-4.2:
 
@@ -248,10 +249,6 @@ Internationalization
 
 * Added support and translations for the Central Kurdish (Sorani) language.
 
-* The :class:`~django.middleware.locale.LocaleMiddleware` now respects a
-  language from the request when :func:`~django.conf.urls.i18n.i18n_patterns`
-  is used with the ``prefix_default_language`` argument set to ``False``.
-
 Logging
 ~~~~~~~
 
@@ -412,6 +409,16 @@ fields modified in the custom ``save()`` methods should be added to the
 ``update_fields`` keyword argument before calling ``super()``. See
 :ref:`overriding-model-methods` for more details.
 
+Dropped support for raw aggregations on MySQL
+---------------------------------------------
+
+MySQL 8+ allows functional dependencies on ``GROUP BY`` columns, so the
+pre-Django 4.2 workaround of grouping by primary keys of the main table is
+removed. As a consequence, using ``RawSQL()`` aggregations is no longer
+supported on MySQL as there is no way to determine if such aggregations are
+needed or valid in the ``GROUP BY`` clause. Use :ref:`aggregation-functions`
+instead.
+
 Miscellaneous
 -------------
 
@@ -467,6 +474,12 @@ Miscellaneous
 
 * Support for ``PROJ`` < 5 is removed.
 
+* :class:`~django.core.mail.backends.smtp.EmailBackend` now verifies a
+  :py:attr:`hostname <ssl.SSLContext.check_hostname>` and
+  :py:attr:`certificates <ssl.SSLContext.verify_mode>`. If you need the
+  previous behavior that is less restrictive and not recommended, subclass
+  ``EmailBackend`` and override the ``ssl_context`` property.
+
 .. _deprecated-features-4.2:
 
 Features deprecated in 4.2
@@ -475,9 +488,8 @@ Features deprecated in 4.2
 ``index_together`` option is deprecated in favor of ``indexes``
 ---------------------------------------------------------------
 
-The :attr:`Meta.index_together <django.db.models.Options.index_together>`
-option is deprecated in favor of the :attr:`~django.db.models.Options.indexes`
-option.
+The ``Meta.index_together`` option is deprecated in favor of the
+:attr:`~django.db.models.Options.indexes` option.
 
 Migrating existing ``index_together`` should be handled as a migration. For
 example::
@@ -500,7 +512,8 @@ Should become::
 
 Running the :djadmin:`makemigrations` command will generate a migration
 containing a :class:`~django.db.migrations.operations.RenameIndex` operation
-which will rename the existing index.
+which will rename the existing index. Next, consider squashing migrations to
+remove ``index_together`` from historical migrations.
 
 The ``AlterIndexTogether`` migration operation is now officially supported only
 for pre-Django 4.2 migration files. For backward compatibility reasons, it's
@@ -520,7 +533,7 @@ During the deprecation period string literals will be attempted to be JSON
 decoded and a warning will be emitted on success that points at passing
 non-encoded forms instead.
 
-Code that use to pass JSON encoded string literals::
+Code that used to pass JSON encoded string literals::
 
     Document.objects.bulk_create(
         Document(data=Value("null")),

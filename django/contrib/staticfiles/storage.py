@@ -54,19 +54,19 @@ class HashedFilesMixin:
             (
                 (
                     r"""(?P<matched>import(?s:(?P<import>[\s\{].*?))"""
-                    r"""\s*from\s*['"](?P<url>[\.\/].*?)["']\s*;)"""
+                    r"""\s*from\s*['"](?P<url>[./].*?)["']\s*;)"""
                 ),
                 """import%(import)s from "%(url)s";""",
             ),
             (
                 (
                     r"""(?P<matched>export(?s:(?P<exports>[\s\{].*?))"""
-                    r"""\s*from\s*["'](?P<url>[\.\/].*?)["']\s*;)"""
+                    r"""\s*from\s*["'](?P<url>[./].*?)["']\s*;)"""
                 ),
                 """export%(exports)s from "%(url)s";""",
             ),
             (
-                r"""(?P<matched>import\s*['"](?P<url>[\.\/].*?)["']\s*;)""",
+                r"""(?P<matched>import\s*['"](?P<url>[./].*?)["']\s*;)""",
                 """import"%(url)s";""",
             ),
             (
@@ -86,7 +86,7 @@ class HashedFilesMixin:
                 ),
                 (
                     (
-                        r"(?m)(?P<matched>)^(/\*#[ \t]"
+                        r"(?m)^(?P<matched>/\*#[ \t]"
                         r"(?-i:sourceMappingURL)=(?P<url>.*)[ \t]*\*/)$"
                     ),
                     "/*# sourceMappingURL=%(url)s */",
@@ -97,7 +97,7 @@ class HashedFilesMixin:
             "*.js",
             (
                 (
-                    r"(?m)(?P<matched>)^(//# (?-i:sourceMappingURL)=(?P<url>.*))$",
+                    r"(?m)^(?P<matched>//# (?-i:sourceMappingURL)=(?P<url>.*))$",
                     "//# sourceMappingURL=%(url)s",
                 ),
             ),

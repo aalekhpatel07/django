@@ -2392,20 +2392,35 @@ class MakeMigrationsTests(MigrationTestBase):
                 "makemigrations", "migrations", "--name", "invalid name", "--empty"
             )
 
-    def test_makemigrations_check(self):
+    def test_makemigrations_check_with_changes(self):
         """
         makemigrations --check should exit with a non-zero status when
         there are changes to an app requiring migrations.
         """
+        out = io.StringIO()
         with self.temporary_migration_module() as tmpdir:
-            with self.assertRaises(SystemExit):
-                call_command("makemigrations", "--check", "migrations", verbosity=0)
-            self.assertFalse(os.path.exists(tmpdir))
+            with self.assertRaises(SystemExit) as cm:
+                call_command(
+                    "makemigrations",
+                    "--check",
+                    "migrations",
+                    stdout=out,
+                )
+            self.assertEqual(os.listdir(tmpdir), ["__init__.py"])
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("Migrations for 'migrations':", out.getvalue())
 
+    def test_makemigrations_check_no_changes(self):
+        """
+        makemigrations --check should exit with a zero status when there are no
+        changes.
+        """
+        out = io.StringIO()
         with self.temporary_migration_module(
             module="migrations.test_migrations_no_changes"
         ):
-            call_command("makemigrations", "--check", "migrations", verbosity=0)
+            call_command("makemigrations", "--check", "migrations", stdout=out)
+        self.assertEqual("No changes detected in app 'migrations'\n", out.getvalue())
 
     def test_makemigrations_migration_path_output(self):
         """
@@ -2654,6 +2669,32 @@ class MakeMigrationsTests(MigrationTestBase):
             with open(new_migration_file) as fp:
                 self.assertNotEqual(initial_content, fp.read())
             self.assertIn(f"Deleted {migration_file}", out.getvalue())
+
+    def test_makemigrations_update_custom_name(self):
+        custom_name = "delete_something"
+        with self.temporary_migration_module(
+            module="migrations.test_migrations"
+        ) as migration_dir:
+            old_migration_file = os.path.join(migration_dir, "0002_second.py")
+            with open(old_migration_file) as fp:
+                initial_content = fp.read()
+
+            with captured_stdout() as out:
+                call_command(
+                    "makemigrations", "migrations", update=True, name=custom_name
+                )
+            self.assertFalse(
+                any(
+                    filename.startswith("0003")
+                    for filename in os.listdir(migration_dir)
+                )
+            )
+            self.assertIs(os.path.exists(old_migration_file), False)
+            new_migration_file = os.path.join(migration_dir, f"0002_{custom_name}.py")
+            self.assertIs(os.path.exists(new_migration_file), True)
+            with open(new_migration_file) as fp:
+                self.assertNotEqual(initial_content, fp.read())
+            self.assertIn(f"Deleted {old_migration_file}", out.getvalue())
 
     def test_makemigrations_update_applied_migration(self):
         recorder = MigrationRecorder(connection)

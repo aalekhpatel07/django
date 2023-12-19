@@ -218,6 +218,26 @@ Apps without migrations must not have relations (``ForeignKey``,
 ``ManyToManyField``, etc.) to apps with migrations. Sometimes it may work, but
 it's not supported.
 
+Swappable dependencies
+----------------------
+
+.. function:: django.db.migrations.swappable_dependency(value)
+
+The ``swappable_dependency()`` function is used in migrations to declare
+"swappable" dependencies on migrations in the app of the swapped-in model,
+currently, on the first migration of this app. As a consequence, the swapped-in
+model should be created in the initial migration. The argument ``value`` is a
+string ``"<app label>.<model>"`` describing an app label and a model name, e.g.
+``"myapp.MyModel"``.
+
+By using ``swappable_dependency()``, you inform the migration framework that
+the migration relies on another migration which sets up a swappable model,
+allowing for the possibility of substituting the model with a different
+implementation in the future. This is typically used for referencing models
+that are subject to customization or replacement, such as the custom user
+model (``settings.AUTH_USER_MODEL``, which defaults to ``"auth.User"``) in
+Django's authentication system.
+
 .. _migration-files:
 
 Migration files
@@ -763,14 +783,22 @@ Django can serialize the following:
 - ``LazyObject`` instances which wrap a serializable value.
 - Enumeration types (e.g. ``TextChoices`` or ``IntegerChoices``) instances.
 - Any Django field
-- Any function or method reference (e.g. ``datetime.datetime.today``) (must be in module's top-level scope)
+- Any function or method reference (e.g. ``datetime.datetime.today``) (must be
+  in module's top-level scope)
+
+  - Functions may be decorated if wrapped properly, i.e. using
+    :func:`functools.wraps`
+  - The :func:`functools.cache` and :func:`functools.lru_cache` decorators are
+    explicitly supported
+
 - Unbound methods used from within the class body
 - Any class reference (must be in module's top-level scope)
 - Anything with a custom ``deconstruct()`` method (:ref:`see below <custom-deconstruct-method>`)
 
-.. versionchanged:: 4.2
+.. versionchanged:: 5.0
 
-    Serialization support for ``enum.Flag`` was added.
+    Serialization support for functions decorated with :func:`functools.cache`
+    or :func:`functools.lru_cache` was added.
 
 Django cannot serialize:
 

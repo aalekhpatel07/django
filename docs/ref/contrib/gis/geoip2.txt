@@ -23,10 +23,6 @@ __ https://dev.maxmind.com/geoip/geolite2-free-geolocation-data
 __ https://db-ip.com/db/lite.php
 __ https://github.com/maxmind/libmaxminddb/
 
-.. versionchanged:: 4.2
-
-    Support for ``.mmdb`` files downloaded from DB-IP was added.
-
 Example
 =======
 
@@ -104,6 +100,10 @@ Instantiating
 This classmethod instantiates the GeoIP object from the given database path
 and given cache setting.
 
+.. deprecated:: 5.1
+
+   Use the :class:`GeoIP2()` constructor instead.
+
 Querying
 --------
 
@@ -136,6 +136,10 @@ Coordinate Retrieval
 .. method:: GeoIP2.coords(query)
 
 Returns a coordinate tuple of (longitude, latitude).
+
+.. deprecated:: 5.1
+
+    Use :meth:`.GeoIP2.lon_lat` instead.
 
 .. method:: GeoIP2.lon_lat(query)
 
